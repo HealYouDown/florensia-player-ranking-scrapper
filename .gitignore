@@ -1,0 +1,6 @@
+*.xlsx
+temp/
+.vscode/
+__pycache__/
+env/
+*.db
