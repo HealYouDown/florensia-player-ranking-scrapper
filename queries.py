@@ -1,8 +1,9 @@
-from main import Player
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from xlsxwriter import Workbook
 from xlsxwriter.utility import xl_rowcol_to_cell
+
+from models import Guild, Player
 
 BASE_CLASSES = ["Noble", "Mercenary", "Saint", "Explorer"]
 
@@ -28,5 +29,3 @@ if __name__ == "__main__":
 
     # any queries go here
     # e.g. session.query(Player).filter(Player.level == 105).count()
-
-    

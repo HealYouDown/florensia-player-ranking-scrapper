@@ -1,27 +1,20 @@
-import requests
-from io import BytesIO
-from lxml import html
-from multiprocessing.pool import ThreadPool
-import time
+import hashlib
 import json
 import os
+import shutil
+from io import BytesIO
+from multiprocessing import Pool
+
+import requests
+import tqdm
+from lxml import html
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine, Column, String, Integer
-from sqlalchemy.ext.declarative import declarative_base
+
+from models import Base, Guild, Player
 
 url = "https://www.florensia-online.com/de/rankings"
-Base = declarative_base()
-
-
-class Player(Base):
-    __tablename__ = "player"
-    rank = Column(Integer, primary_key=True)
-    name = Column(String)
-    class_ = Column(String)
-    level_land = Column(Integer)
-    level_sea = Column(Integer)
-    guild = Column(String)
-    server = Column(String)
+path = "./ranking.db"
 
 
 def get_number_of_pages() -> int:
@@ -35,7 +28,7 @@ def get_number_of_pages() -> int:
 
 def download(url: str):
     content = requests.get(url).content
-    
+
     parser = html.parse(BytesIO(content))
 
     table_data_elements = parser.xpath("//tbody/tr/td")
@@ -60,18 +53,22 @@ def download(url: str):
 
 
 if __name__ == "__main__":
-    # Download
-    t1 = time.time()
+    if not os.path.exists("./temp"):
+        os.mkdir("./temp")
 
+    # Download
     max_pages = get_number_of_pages()
     urls = [url + "?page=" + str(i) for i in range(1, max_pages+1)]
 
-    ThreadPool(32).map(download, urls)
-
-    print(f"Finished downloading in {time.time() - t1}")
+    pool = Pool(processes=6)
+    for _ in tqdm.tqdm(pool.imap(download, urls),
+                       total=len(urls),
+                       desc="Download Status",
+                       unit="Files"):
+        pass
 
     # Database
-    engine = create_engine("sqlite:///ranking.db", echo=False)
+    engine = create_engine(f"sqlite:///{path}", echo=False)
 
     try:
         Player.__table__.drop(bind=engine)
@@ -79,17 +76,36 @@ if __name__ == "__main__":
         pass
     finally:
         Base.metadata.create_all(bind=engine)
-    
+
     Session = sessionmaker(bind=engine)
     session = Session()
-    
-    max_length = len(os.listdir("./temp"))
+
+    guilds = set()
+    players = []
     for index, fname in enumerate(os.listdir("./temp")):
         with open("./temp/" + fname) as f:
             data = json.load(f)
 
+        players.extend([p for p in data if p["guild"] not in ["", None]])
+        guilds.update([(p["guild"], p["server"]) for p in data if p["guild"] not in ["", None]])
         session.bulk_insert_mappings(Player, data)
+
+    session.flush()
+
+    guild_data = [{"id": index,
+                   "name": guild[0],
+                   "server": guild[1],
+                   "name_hash": hashlib.md5(guild[0].encode()).hexdigest(),
+                   } for index, guild in enumerate(guilds)
+                  ]
+
+    for guild in guild_data:
+        guild_members = [p for p in players if p["guild"] == guild["name"]]
+        guild["number_of_members"] = len(guild_members)
+        guild["avg_rank"] = sum([p["rank"] for p in guild_members]) / len(guild_members)
+
+    session.bulk_insert_mappings(Guild, guild_data)
 
     session.commit()
 
-    print(f"Finished in {time.time() - t1}")
+    shutil.rmtree("./temp")
