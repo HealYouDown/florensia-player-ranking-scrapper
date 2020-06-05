@@ -1,24 +1,23 @@
-import hashlib
+import asyncio
 import json
 import os
 import shutil
+import time
 from io import BytesIO
-from multiprocessing import Pool
 
 import requests
-import tqdm
+from aiohttp import ClientSession, ClientTimeout
 from lxml import html
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from models import Base, Guild, Player
+from logger import setup_logger
 
-url = "https://www.florensia-online.com/de/rankings"
-path = "./ranking.db"
+URL = "https://www.florensia-online.com/de/rankings"
+TEMP_PATH = "./temp"
+logger = setup_logger()
 
 
 def get_number_of_pages() -> int:
-    content = requests.get(url).content
+    content = requests.get(URL).content
     parser = html.parse(BytesIO(content))
     pagination_textes = parser.xpath(
         "//li[starts-with(@class, 'page-item')]/*/text()")
@@ -26,86 +25,81 @@ def get_number_of_pages() -> int:
     return int(pagination_textes[-2])
 
 
-def download(url: str):
-    content = requests.get(url).content
+async def fetch(url, session):
+    try:
+        async with session.get(url) as response:
+            assert response.status == 200
+            content = await response.read()
+            parser = html.parse(BytesIO(content))
 
-    parser = html.parse(BytesIO(content))
+            table_data_elements = parser.xpath("//tbody/tr/td")
+            table_data = [elem.text for elem in table_data_elements]
 
-    table_data_elements = parser.xpath("//tbody/tr/td")
-    table_data = [elem.text for elem in table_data_elements]
+            players = []
 
+            for row in zip(*[iter(table_data)] * 10):
+                players.append({
+                    "rank": int(row[0]),
+                    "name": row[2],
+                    "class_": row[3],
+                    "level_land": int(row[4]),
+                    "level_sea": int(row[6]),
+                    "guild": row[8],
+                    "server": row[9]
+                })
+
+            fname = url.split("=")[1]
+            with open(f"./temp/{fname}.json", "w") as f:
+                json.dump(players, f)
+    except asyncio.exceptions.TimeoutError:
+        page = url.split("?page=")[-1]
+        logger.error(f"Failed to get page {page} - Timeout Error")
+
+
+async def fetch_data():
+    urls = [f"{URL}?page={i+1}" for i in range(get_number_of_pages())]
+    logger.info(f"Found {len(urls)} url(s)")
+
+    timeout = ClientTimeout(total=10*60)
+
+    async with ClientSession(timeout=timeout) as session:
+        tasks = [
+            asyncio.ensure_future(fetch(url, session))
+            for url in urls
+        ]
+
+        await asyncio.gather(*tasks)
+
+
+def main():
+    logger.info("-- Scrapper Script Start --")
+
+    if not os.path.exists(TEMP_PATH):
+        os.mkdir(TEMP_PATH)
+        
+    # Fetching data
+    logger.info("Start fetching data")
+    start_time = time.time()
+
+    loop = asyncio.get_event_loop()
+    future = asyncio.ensure_future(fetch_data())
+    loop.run_until_complete(future)
+
+    logger.info(f"Finished fetching data in {round(time.time() - start_time, 2)} seconds")
+
+    # Read data
     players = []
+    for f in os.listdir(TEMP_PATH):
+        with open(os.path.join(TEMP_PATH, f), "r") as fp:
+            players.extend(json.load(fp))
 
-    for row in zip(*[iter(table_data)] * 10):
-        players.append({
-            "rank": int(row[0]),
-            "name": row[2],
-            "class_": row[3],
-            "level_land": int(row[4]),
-            "level_sea": int(row[6]),
-            "guild": row[8],
-            "server": row[9]
-        })
+    with open("players.json", "w") as fp:
+        json.dump(players, fp)
 
-    fname = url.split("=")[1]
-    with open(f"./temp/{fname}.json", "w") as f:
-        json.dump(players, f)
+    shutil.rmtree(TEMP_PATH)
+
+    logger.info("-- Scrapper Script End --")
 
 
 if __name__ == "__main__":
-    if not os.path.exists("./temp"):
-        os.mkdir("./temp")
-
-    # Download
-    max_pages = get_number_of_pages()
-    urls = [url + "?page=" + str(i) for i in range(1, max_pages+1)]
-
-    pool = Pool(processes=6)
-    for _ in tqdm.tqdm(pool.imap(download, urls),
-                       total=len(urls),
-                       desc="Download Status",
-                       unit="Files"):
-        pass
-
-    # Database
-    engine = create_engine(f"sqlite:///{path}", echo=False)
-
-    try:
-        Player.__table__.drop(bind=engine)
-    except:
-        pass
-    finally:
-        Base.metadata.create_all(bind=engine)
-
-    Session = sessionmaker(bind=engine)
-    session = Session()
-
-    guilds = set()
-    players = []
-    for index, fname in enumerate(os.listdir("./temp")):
-        with open("./temp/" + fname) as f:
-            data = json.load(f)
-
-        players.extend([p for p in data if p["guild"] not in ["", None]])
-        guilds.update([(p["guild"], p["server"]) for p in data if p["guild"] not in ["", None]])
-        session.bulk_insert_mappings(Player, data)
-
-    session.flush()
-
-    guild_data = [{"id": index,
-                   "name": guild[0],
-                   "server": guild[1],
-                   "name_hash": hashlib.md5(guild[0].encode()).hexdigest(),
-                   } for index, guild in enumerate(guilds)
-                  ]
-
-    for guild in guild_data:
-        guild_members = [p for p in players if p["guild"] == guild["name"]]
-        guild["number_of_members"] = len(guild_members)
-        guild["avg_rank"] = sum([p["rank"] for p in guild_members]) / len(guild_members)
-
-    session.bulk_insert_mappings(Guild, guild_data)
-
-    session.commit()
-
-    shutil.rmtree("./temp")
+    main()

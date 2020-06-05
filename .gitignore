@@ -1,6 +1,5 @@
-*.xlsx
 temp/
+env/
 .vscode/
 __pycache__/
-env/
-*.db
+*.json
