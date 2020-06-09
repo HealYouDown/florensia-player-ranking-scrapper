@@ -93,7 +93,8 @@ def main():
         with open(os.path.join(TEMP_PATH, f), "r") as fp:
             players.extend(json.load(fp))
 
-    with open("players.json", "w") as fp:
+    directory = os.path.abspath(os.path.dirname(__file__))
+    with open(os.path.join(directory, "players.json"), "w") as fp:
         json.dump(players, fp)
 
     shutil.rmtree(TEMP_PATH)
